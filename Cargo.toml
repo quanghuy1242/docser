@@ -1,0 +1,22 @@
+[package]
+name = "docser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["server", "transport-io"] }
+anyhow = "1.0"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+serde_json = "1.0"
+chromiumoxide = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+futures-util = { version = "0.3", features = ["sink"] }
+html2md = "0.2"
+
+[profile.release]
+opt-level = "z"  # Optimize for size
+lto = true       # Link-time optimization
+codegen-units = 1 # Reduce parallel codegen units
+strip = true     # Strip debug symbols
