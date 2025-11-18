@@ -1,6 +1,6 @@
 # Docser
 
-A web scraping MCP server that converts web pages to markdown using headless browser automation. There should be tons of other tools, but I wanted to do this myself.
+A web scraping MCP server that converts web pages to markdown using headless browser automation. There should be tons of other tools, but I wanted to do this myself, locally, without relying on third-party APIs. I have tried to use CDP, but it was too limited and unstable for complex pages. So I built this using Playwright of WebKit, less heavy than Chromium.
 
 ## Quick Install
 
@@ -9,14 +9,7 @@ A web scraping MCP server that converts web pages to markdown using headless bro
    cargo install --git https://github.com/quanghuy1242/docser
    ```
 
-2. **Install browser binaries:**
-   ```bash
-   npx playwright install webkit
-   ```
-
-   **Note:** This downloads WebKit browser (~50MB) required for scraping.
-
-3. **Configure MCP:**
+2. **Configure MCP:**
    ```json
    {
      "mcpServers": {
