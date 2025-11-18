@@ -352,9 +352,7 @@ impl SimpleServer {
             }
 
             // Wait for search results
-            let ready_indicators = vec![
-                "document.querySelector('.gs-title')",
-            ];
+            let ready_indicators = vec!["document.querySelector('.gs-title')"];
 
             let max_wait_ms = 10000;
             let check_interval_ms = 250;
@@ -415,7 +413,7 @@ impl SimpleServer {
                         && seen.insert(l.href.clone())
                 })
                 .collect();
-            
+
             // Debug: Print first few extracted links to verify
             if !links.is_empty() {
                 eprintln!("DEBUG: Found {} links in total", links.len());
@@ -446,12 +444,17 @@ impl SimpleServer {
             for page_num in 2..=max_page {
                 // Get current page number to verify navigation worked
                 let current_page: String = page
-                    .evaluate_value("document.querySelector('.gsc-cursor-current-page')?.textContent")
+                    .evaluate_value(
+                        "document.querySelector('.gsc-cursor-current-page')?.textContent",
+                    )
                     .await
                     .unwrap_or_else(|_| "-1".to_string());
-                
-                eprintln!("DEBUG: Currently on page {}, trying to navigate to page {}", current_page, page_num);
-                
+
+                eprintln!(
+                    "DEBUG: Currently on page {}, trying to navigate to page {}",
+                    current_page, page_num
+                );
+
                 // Click the target page number
                 let locator = page
                     .locator(&format!(".gsc-cursor-page:nth-child({})", page_num))
@@ -463,21 +466,24 @@ impl SimpleServer {
 
                     let mut page_loaded = false;
                     let mut loading_detected = true;
-                    
+
                     // First wait for loading to start (might already be loading)
                     for _ in 0..(2000 / pagination_check_interval_ms) {
                         let result: String = page
                             .evaluate_value("!!document.querySelector('.gsc-control-wrapper-cse.gsc-loading-fade')")
                             .await
                             .unwrap_or_else(|_| "false".to_string());
-                            
+
                         if result == "true" {
                             loading_detected = true;
                             break;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(pagination_check_interval_ms)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            pagination_check_interval_ms,
+                        ))
+                        .await;
                     }
-                    
+
                     // If we detected loading, wait for it to complete
                     if loading_detected {
                         for _ in 0..(max_pagination_wait_ms / pagination_check_interval_ms) {
@@ -485,26 +491,33 @@ impl SimpleServer {
                                 .evaluate_value("!!document.querySelector('.gsc-control-wrapper-cse.gsc-loading-fade')")
                                 .await
                                 .unwrap_or_else(|_| "false".to_string());
-                                
+
                             if result == "false" {
                                 // Loading has completed, verify we actually reached the target page
                                 let new_page: String = page
                                     .evaluate_value(&format!("document.querySelector('.gsc-cursor-page:nth-child({})')?.textContent", page_num))
                                     .await
                                     .unwrap_or_else(|_| "??".to_string());
-                                
+
                                 if new_page == page_num.to_string() {
                                     // Successfully navigated to the target page
                                     page_loaded = true;
                                     eprintln!("DEBUG: Successfully navigated to page {}", page_num);
                                     // Additional stabilization delay
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500))
+                                        .await;
                                     break;
                                 } else {
-                                    eprintln!("WARNING: Expected page {} but ended up on page {}", page_num, new_page);
+                                    eprintln!(
+                                        "WARNING: Expected page {} but ended up on page {}",
+                                        page_num, new_page
+                                    );
                                 }
                             }
-                            tokio::time::sleep(tokio::time::Duration::from_millis(pagination_check_interval_ms)).await;
+                            tokio::time::sleep(tokio::time::Duration::from_millis(
+                                pagination_check_interval_ms,
+                            ))
+                            .await;
                         }
                     }
 
