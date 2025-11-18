@@ -1,53 +1,130 @@
+use html2md;
+use playwright_rs::{Playwright, protocol::page::{GotoOptions, WaitUntil}};
 use rmcp::{
-    ServerHandler, ServiceExt,
-    model::{ServerCapabilities, ServerInfo, CallToolResult, Content},
-    transport::stdio,
-    tool, tool_handler, tool_router,
-    ErrorData as McpError,
+    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
-    schemars,
+    model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
+    transport::stdio,
 };
 use serde::Deserialize;
-use chromiumoxide::{Browser, BrowserConfig};
-use html2md;
-use futures_util::StreamExt;
+
+use std::sync::OnceLock;
+
+static JS_SCRIPT: OnceLock<String> = OnceLock::new();
+
+fn load_js_script() -> &'static str {
+    JS_SCRIPT.get_or_init(|| {
+        r#"
+(function() {
+    /**
+     * Recursively extracts HTML from a root node, correctly processing open shadow DOMs,
+     * filling <slot> elements, and ignoring <style> and <script> tags.
+     *
+     * @param {Node} root - The root node to start extracting HTML from.
+     * @returns {string} The serialized HTML as a string.
+     */
+    function getComposedHtml(root) {
+        let html = '';
+
+        /**
+         * The recursive function that traverses the DOM.
+         * @param {Node} node - The current node to process.
+         */
+        function traverseAndBuildHtml(node) {
+            switch (node.nodeType) {
+                // Element node (e.g., <div>, <p>, <my-component>)
+                case Node.ELEMENT_NODE:
+                    const tagName = node.tagName.toLowerCase();
+
+                    // --- NEW: IGNORE SCRIPT AND STYLE TAGS ---
+                    // If the node is a style or script tag, stop processing it and its children.
+                    if (tagName === 'style' || tagName === 'script') {
+                        return; // Exit this branch of the traversal
+                    }
+
+                    // --- KEY LOGIC FOR <SLOT> ELEMENTS ---
+                    if (tagName === 'slot') {
+                        const assignedNodes = node.assignedNodes();
+                        if (assignedNodes.length > 0) {
+                            for (const assignedNode of assignedNodes) {
+                                traverseAndBuildHtml(assignedNode);
+                            }
+                        } else {
+                            for (const fallbackChild of node.childNodes) {
+                                traverseAndBuildHtml(fallbackChild);
+                            }
+                        }
+                        return; // Stop processing this slot element
+                    }
+
+                    // For all other elements:
+                    // Reconstruct the opening tag, including its attributes.
+                    const attributes = Array.from(node.attributes).map(attr => ` ${attr.name}="${attr.value}"`).join('');
+                    html += `<${tagName}${attributes}>`;
+
+                    // If the element hosts a shadow root, traverse into the shadow DOM.
+                    // Otherwise, traverse its regular children (light DOM).
+                    const children = node.shadowRoot ? node.shadowRoot.childNodes : node.childNodes;
+                    for (const child of children) {
+                        traverseAndBuildHtml(child);
+                    }
+
+                    // Add the closing tag.
+                    html += `</${tagName}>`;
+                    break;
+
+                // Text node
+                case Node.TEXT_NODE:
+                    html += node.textContent;
+                    break;
+
+                // Comment node
+                case Node.COMMENT_NODE:
+                    html += `<!--${node.textContent}-->`;
+                    break;
+                
+                // For other node types (like DocumentFragment), just process their children.
+                default:
+                   if (node.childNodes) {
+                       for (const child of node.childNodes) {
+                            traverseAndBuildHtml(child);
+                        }
+                   }
+                   break;
+            }
+        }
+
+        // Start the traversal from the children of the provided root node.
+        for (const child of root.childNodes) {
+            traverseAndBuildHtml(child);
+        }
+
+        return html;
+    }
+
+    // Get the full HTML by wrapping the composed content
+    const htmlAttributes = Array.from(document.documentElement.attributes).map(attr => ` ${attr.name}="${attr.value}"`).join('');
+    return `<html${htmlAttributes}>` + getComposedHtml(document.documentElement) + '</html>';
+})()
+"#.to_string()
+    })
+}
+
 
 #[derive(Clone)]
 struct SimpleServer {
     tool_router: ToolRouter<Self>,
+    playwright: std::sync::Arc<tokio::sync::Mutex<Option<std::sync::Arc<Playwright>>>>,
 }
 
 impl SimpleServer {
-    fn new() -> Self {
+    async fn new() -> Self {
+        let playwright = Playwright::launch().await.ok().map(std::sync::Arc::new);
         Self {
             tool_router: Self::tool_router(),
-        }
-    }
-
-    async fn wait_for_function(&self, page: &chromiumoxide::Page, js_function: &str, timeout_ms: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let start_time = std::time::Instant::now();
-        let polling_interval = std::time::Duration::from_millis(200); // Reduced polling frequency
-        
-        loop {
-            if start_time.elapsed().as_millis() > timeout_ms as u128 {
-                return Err("Timeout waiting for function".into());
-            }
-            
-            // Evaluate the function directly (not wrapped in Boolean)
-            match page.evaluate(js_function).await {
-                Ok(result) => {
-                    if let Ok(value) = result.into_value::<bool>() {
-                        if value {
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(_) => {} // Ignore evaluation errors during polling
-            }
-            
-            // Wait before next poll
-            tokio::time::sleep(polling_interval).await;
+            playwright: std::sync::Arc::new(tokio::sync::Mutex::new(playwright)),
         }
     }
 }
@@ -60,109 +137,64 @@ struct CrawlUrlRequest {
 #[tool_router]
 impl SimpleServer {
     #[tool(description = "Crawls a URL and converts the content to markdown")]
-    async fn crawl_url(&self, Parameters(request): Parameters<CrawlUrlRequest>) -> Result<CallToolResult, McpError> {
+    async fn crawl_url(
+        &self,
+        Parameters(request): Parameters<CrawlUrlRequest>,
+    ) -> Result<CallToolResult, McpError> {
         match self.crawl_and_convert(&request.url).await {
             Ok(markdown) => Ok(CallToolResult::success(vec![Content::text(markdown)])),
-            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!("Error crawling URL: {}", e))]))
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Error crawling URL: {}",
+                e
+            ))])),
         }
     }
 }
 
 impl SimpleServer {
-    async fn crawl_and_convert(&self, url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Launch browser
-        let (mut browser, mut handler) = Browser::launch(BrowserConfig::builder()
-            .build()?)
-            .await?;
-
-        // Spawn handler task
-        tokio::spawn(async move {
-            while let Some(_) = handler.next().await {}
-        });
-
-        // Create page and navigate
-        let page = browser.new_page(url).await?;
-        
-        // Enable stealth mode to avoid detection
-        page.enable_stealth_mode().await?;
-        
-                // Wait for page to load initially
-        page.wait_for_navigation().await?;
-        
-        // Try to trigger content loading by scrolling
-        page.evaluate(r#"
-            // Quick scroll to trigger lazy loading
-            window.scrollTo(0, 500);
-            setTimeout(() => window.scrollTo(0, 0), 200);
-        "#).await?;
-        
-        // Wait for Angular/Material Design content to load using polling
-        let angular_loaded = self.wait_for_function(&page, r#"
-            (function() {
-                const hasAngular = !!document.querySelector('[ng-version]');
-                if (hasAngular) {
-                    const main = document.querySelector('main');
-                    const hasContent = main && main.innerText.length > 50;
-                    return hasContent;
-                }
-                return false;
-            })()
-        "#, 3000).await; // Reduced to 3 seconds // Increased timeout to 20 seconds
-        
-        if angular_loaded.is_err() {
-            eprintln!("Warning: Angular content loading timed out, proceeding with available content");
-        }
-        
-        // Additional wait for Angular to render
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-        
-        // Get the HTML content
-        let html = page.content().await?;
-        
-        // Close browser
-        browser.close().await?;
-        
-        // Preprocess HTML to remove style and script tags
-        let processed_html = if let Some(body_start) = html.find("<body") {
-            eprintln!("DEBUG: Found body tag at position {}", body_start);
-            if let Some(body_end) = html[body_start..].find("</body>") {
-                eprintln!("DEBUG: Found body end tag at relative position {}", body_end);
-                let body_content = &html[body_start..body_start + body_end + 7];
-                eprintln!("DEBUG: Body content length: {}", body_content.len());
-                
-                // Remove style and script tags
-                let without_styles = body_content.split("<style").flat_map(|part| {
-                    if let Some(end) = part.find("</style>") {
-                        vec![&part[end + 8..]]
-                    } else {
-                        vec![part]
-                    }
-                }).collect::<String>();
-                
-                let without_scripts = without_styles.split("<script").flat_map(|part| {
-                    if let Some(end) = part.find("</script>") {
-                        vec![&part[end + 9..]]
-                    } else {
-                        vec![part]
-                    }
-                }).collect::<String>();
-                
-                eprintln!("DEBUG: After removing styles/scripts: {}", without_scripts.len());
-                without_scripts
+    async fn crawl_and_convert(
+        &self,
+        url: &str,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let playwright = {
+            let mut pw_lock = self.playwright.lock().await;
+            if let Some(ref pw) = *pw_lock {
+                pw.clone()
             } else {
-                eprintln!("DEBUG: No body end tag found");
-                html
+                let pw = std::sync::Arc::new(Playwright::launch().await?);
+                *pw_lock = Some(pw.clone());
+                pw
             }
-        } else {
-            eprintln!("DEBUG: No body tag found, using full HTML");
-            html
         };
-        
-        eprintln!("DEBUG: Processed HTML length: {}", processed_html.len());
-        eprintln!("DEBUG: Still contains @font-face: {}", processed_html.contains("@font-face"));
-        
-        // Convert HTML to markdown
-        let markdown = html2md::parse_html(&processed_html);
+
+        let _args = vec![
+            "--no-sandbox".to_string(),
+            "--disable-setuid-sandbox".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+            "--disable-web-security".to_string(),
+            "--disable-background-timer-throttling".to_string(),
+            "--disable-renderer-backgrounding".to_string(),
+            "--disable-backgrounding-occluded-windows".to_string(),
+        ];
+
+        let browser = playwright.webkit().launch().await?;
+
+        let page = browser.new_page().await?;
+
+        let response = page
+            .goto(url, Some(GotoOptions::new().wait_until(WaitUntil::NetworkIdle)))
+            .await?
+            .expect("URL should return a response");
+        if !response.ok() {
+            return Err(format!("HTTP error: {}", response.status()).into());
+        }
+
+        // Get the HTML content, expanding shadow roots and handling slots, excluding style and script tags
+        let html: String = page.evaluate_value(load_js_script()).await?;
+
+        // Convert to markdown
+        let markdown = html2md::parse_html(&html);
+
         eprintln!("DEBUG: Markdown length: {}", markdown.len());
         Ok(markdown)
     }
@@ -191,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .with_writer(std::io::stderr)
     //     .init();
 
-    let server = SimpleServer::new();
+    let server = SimpleServer::new().await;
     let service = server.serve(stdio()).await?;
 
     service.waiting().await?;
@@ -199,105 +231,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn test_scraping() -> Result<(), Box<dyn std::error::Error>> {
-    println!("DEBUG: Starting test_scraping function");
-    let server = SimpleServer::new();
     let url = "https://m3.material.io/components/search/guidelines";
 
     println!("Testing Material Design content scraping...");
-    
-    // Get HTML first for debugging
-    let (mut browser, mut handler) = Browser::launch(BrowserConfig::builder().build()?).await?;
-    tokio::spawn(async move {
-        while let Some(_) = handler.next().await {}
-    });
-    let page = browser.new_page(url).await?;
-    page.enable_stealth_mode().await?;
-    
-    page.wait_for_navigation().await?;
-    page.evaluate(r#"window.scrollTo(0, 500); setTimeout(() => window.scrollTo(0, 0), 200);"#).await?;
-    
-    let angular_loaded = server.wait_for_function(&page, r#"
-        (function() {
-            const hasAngular = !!document.querySelector('[ng-version]');
-            if (hasAngular) {
-                const main = document.querySelector('main');
-                const hasContent = main && main.innerText.length > 50;
-                return hasContent;
-            }
-            return false;
-        })()
-    "#, 3000).await;
-    
-    if angular_loaded.is_err() {
-        eprintln!("Warning: Angular content loading timed out, proceeding with available content");
-    }
-    
-    tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
-    let html = page.content().await?;
-    browser.close().await?;
-    
-    println!("Raw HTML length: {}", html.len());
+
+    let playwright = Playwright::launch().await?;
+
+    let browser = playwright.webkit().launch().await?;
+
+    let page = browser.new_page().await?;
+
+    let response = page
+        .goto(url, Some(GotoOptions::new().wait_until(WaitUntil::NetworkIdle)))
+        .await?
+        .expect("URL should return a response");
+    assert!(response.ok());
+    assert_eq!(response.status(), 200);
+
+
+    // Get the HTML content, expanding shadow roots and handling slots, excluding style and script tags
+    let html: String = page.evaluate_value(load_js_script()).await?;
+    // Save HTML for debugging
+    std::fs::write(".debug_browser.html", &html)?;
+
+    println!("Browser HTML length: {}", html.len());
     println!("Contains ng-version: {}", html.contains("ng-version"));
     println!("Contains main tag: {}", html.contains("<main"));
     println!("Contains Usage: {}", html.contains("Usage"));
-    
-    // Preprocess HTML to remove style and script tags
-    let processed_html = if let Some(body_start) = html.find("<body") {
-        println!("DEBUG: Found body tag at position {}", body_start);
-        if let Some(body_end) = html[body_start..].find("</body>") {
-            println!("DEBUG: Found body end tag at relative position {}", body_end);
-            let body_content = &html[body_start..body_start + body_end + 7];
-            println!("DEBUG: Body content length: {}", body_content.len());
-            
-            // Remove style and script tags
-            let without_styles = body_content.split("<style").flat_map(|part| {
-                if let Some(end) = part.find("</style>") {
-                    vec![&part[end + 8..]]
-                } else {
-                    vec![part]
-                }
-            }).collect::<String>();
-            
-            let without_scripts = without_styles.split("<script").flat_map(|part| {
-                if let Some(end) = part.find("</script>") {
-                    vec![&part[end + 9..]]
-                } else {
-                    vec![part]
-                }
-            }).collect::<String>();
-            
-            println!("DEBUG: After removing styles/scripts: {}", without_scripts.len());
-            without_scripts
-        } else {
-            println!("DEBUG: No body end tag found");
-            html
-        }
-    } else {
-        println!("DEBUG: No body tag found, using full HTML");
-        html
-    };
-    
-    // Now convert to markdown
-    let markdown = html2md::parse_html(&processed_html);
-    
-    println!("Processed HTML length: {}", processed_html.len());
-    println!("Still contains @font-face: {}", processed_html.contains("@font-face"));
-    println!("Markdown length: {}", markdown.len());
-    
-    // Show the first part of the markdown
+    println!("Contains 'side of the': {}", html.contains("side of the"));
+
+    // Convert to markdown
+    let markdown = html2md::parse_html(&html);
+    std::fs::write(".debug_browser.md", &markdown)?;
+
+    // Show preview
     let preview_len = markdown.len().min(2000);
-    println!("\nMarkdown preview (first {} chars):\n{}", preview_len, &markdown[..preview_len]);
-    
-    // Check for key content
-    if markdown.contains("Search") {
-        println!("✅ Found search content!");
-    }
-    if markdown.contains("Material Design") {
-        println!("✅ Found Material Design reference!");
-    }
-    if markdown.contains("Usage") || markdown.contains("Anatomy") {
-        println!("✅ Found guideline sections!");
-    }
+    println!(
+        "\nMarkdown preview (first {} chars):\n{}",
+        preview_len,
+        &markdown[..preview_len]
+    );
 
     Ok(())
 }
