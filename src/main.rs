@@ -1,5 +1,8 @@
 use html2md;
-use playwright_rs::{Playwright, protocol::page::{GotoOptions, WaitUntil}};
+use playwright_rs::{
+    Playwright,
+    protocol::page::{GotoOptions, WaitUntil},
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::router::tool::ToolRouter,
@@ -9,6 +12,7 @@ use rmcp::{
     transport::stdio,
 };
 use serde::Deserialize;
+use serde::Serialize;
 
 use std::sync::OnceLock;
 
@@ -112,7 +116,6 @@ fn load_js_script() -> &'static str {
     })
 }
 
-
 #[derive(Clone)]
 struct SimpleServer {
     tool_router: ToolRouter<Self>,
@@ -134,6 +137,23 @@ struct CrawlUrlRequest {
     url: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SearchAndroidRequest {
+    query: String,
+    max_page: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct SearchResult {
+    links: Vec<Link>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Link {
+    href: String,
+    text: String,
+}
+
 #[tool_router]
 impl SimpleServer {
     #[tool(description = "Crawls a URL and converts the content to markdown")]
@@ -145,6 +165,23 @@ impl SimpleServer {
             Ok(markdown) => Ok(CallToolResult::success(vec![Content::text(markdown)])),
             Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Error crawling URL: {}",
+                e
+            ))])),
+        }
+    }
+
+    #[tool(description = "Searches Android Developers and returns search links with pagination")]
+    async fn search_android(
+        &self,
+        Parameters(request): Parameters<SearchAndroidRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .search_android_dev(&request.query, request.max_page.unwrap_or(1))
+            .await
+        {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Error searching: {}",
                 e
             ))])),
         }
@@ -182,9 +219,14 @@ impl SimpleServer {
         let page = browser.new_page().await?;
 
         let response = page
-            .goto(url, Some(GotoOptions::new()
-                .wait_until(WaitUntil::DomContentLoaded)
-                .timeout(std::time::Duration::from_secs(30))))
+            .goto(
+                url,
+                Some(
+                    GotoOptions::new()
+                        .wait_until(WaitUntil::DomContentLoaded)
+                        .timeout(std::time::Duration::from_secs(30)),
+                ),
+            )
             .await?
             .expect("URL should return a response");
         if !response.ok() {
@@ -194,15 +236,16 @@ impl SimpleServer {
         // Smart waiting for SPA content: wait for Angular app to be ready
         // Check for Angular-specific indicators or content elements
         let ready_indicators = vec![
-            "document.querySelector('app-post')",  // Angular component
-            "document.querySelector('[ng-version]')",  // Angular app
-            "document.querySelector('main, article, .post-content, .article-content')",  // Content areas
+            "document.querySelector('app-post')",     // Angular component
+            "document.querySelector('[ng-version]')", // Angular app
+            "document.querySelector('main, article, .post-content, .article-content')", // Content areas
         ];
 
         let max_wait_ms = 10000; // 10 seconds for heavy SPAs
         let check_interval_ms = 250; // check every 250ms
+        let mut page_ready = false;
 
-        for _ in 0..(max_wait_ms / check_interval_ms) {
+        for attempt in 0..(max_wait_ms / check_interval_ms) {
             let mut ready = false;
 
             for indicator in &ready_indicators {
@@ -220,18 +263,28 @@ impl SimpleServer {
 
                     if content_check == "true" {
                         ready = true;
+                        eprintln!(
+                            "DEBUG: Page ready indicator '{}' found on attempt {}",
+                            indicator,
+                            attempt + 1
+                        );
                         break;
                     }
                 }
             }
 
             if ready {
+                page_ready = true;
                 // Final stabilization delay
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 break;
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+        }
+
+        if !page_ready {
+            eprintln!("WARNING: Page did not become ready within timeout");
         }
 
         // Get the HTML content, expanding shadow roots and handling slots, excluding style and script tags
@@ -249,6 +302,225 @@ impl SimpleServer {
         url: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.scrape_page(url).await
+    }
+
+    async fn search_android_dev(
+        &self,
+        query: &str,
+        max_page: u32,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "https://developer.android.com/s/results?q={}",
+            urlencoding::encode(query)
+        );
+        let playwright = {
+            let mut pw_lock = self.playwright.lock().await;
+            if let Some(ref pw) = *pw_lock {
+                pw.clone()
+            } else {
+                let pw = std::sync::Arc::new(Playwright::launch().await?);
+                *pw_lock = Some(pw.clone());
+                pw
+            }
+        };
+
+        let browser = playwright.webkit().launch().await?;
+        let page = browser.new_page().await?;
+
+        let mut links = Vec::new();
+
+        // Retry up to 3 times
+        for attempt in 1..=3 {
+            let response = page
+                .goto(
+                    &url,
+                    Some(
+                        GotoOptions::new()
+                            .wait_until(WaitUntil::DomContentLoaded)
+                            .timeout(std::time::Duration::from_secs(30)),
+                    ),
+                )
+                .await?;
+            if let Some(resp) = response {
+                if !resp.ok() {
+                    if attempt == 3 {
+                        return Err(format!("HTTP error: {}", resp.status()).into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+            }
+
+            // Wait for search results
+            let ready_indicators = vec![
+                "document.querySelector('.gsc-results')",
+                "document.querySelector('.gs-title')",
+            ];
+
+            let max_wait_ms = 10000;
+            let check_interval_ms = 250;
+
+            let mut ready = false;
+            for _ in 0..(max_wait_ms / check_interval_ms) {
+                for indicator in &ready_indicators {
+                    let result: String = page
+                        .evaluate_value(&format!("!!({})", indicator))
+                        .await
+                        .unwrap_or_else(|_| "false".to_string());
+
+                    if result == "true" {
+                        ready = true;
+                        break;
+                    }
+                }
+                if ready {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(check_interval_ms)).await;
+            }
+
+            if !ready {
+                eprintln!(
+                    "WARNING: Search results did not load on attempt {} of 3",
+                    attempt
+                );
+                if attempt == 3 {
+                    return Err("Search results did not load after 3 attempts".into());
+                }
+                // Exponential backoff: 1s, 2s, 4s
+                let backoff_secs = 2u64.pow(attempt - 1);
+                eprintln!(
+                    "INFO: Retrying after {} seconds (exponential backoff)",
+                    backoff_secs
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            }
+
+            // Extract links with more specific selector
+            let extracted_links_str: String = page
+                .evaluate_value(r#"JSON.stringify(Array.from(document.querySelectorAll('.gsc-webResult.gsc-result .gs-webResult .gs-title a')).map(a => ({href: a.href, text: a.textContent.trim()})))"#)
+                .await
+                .unwrap_or_else(|_| "[]".to_string());
+
+            let all_links: Vec<Link> =
+                serde_json::from_str(&extracted_links_str).unwrap_or_else(|_| Vec::new());
+
+            // Filter and dedup
+            let mut seen = std::collections::HashSet::new();
+            links = all_links
+                .into_iter()
+                .filter(|l| {
+                    l.href.starts_with("https://developer.android.com/")
+                        && !l.text.is_empty()
+                        && seen.insert(l.href.clone())
+                })
+                .collect();
+
+            if links.is_empty() {
+                eprintln!("WARNING: Primary selector found no links, trying fallback selector");
+                // Fallback
+                let fallback_links_str: String = page
+                    .evaluate_value(r#"JSON.stringify(Array.from(document.querySelectorAll('.devsite-article a')).filter(a => a.href.startsWith('https://developer.android.com/') && a.textContent.trim()).reduce((acc, a) => { if (!acc.some(item => item.href === a.href)) acc.push({href: a.href, text: a.textContent.trim()}); return acc; }, []))"#)
+                    .await
+                    .unwrap_or_else(|_| "[]".to_string());
+                links = serde_json::from_str(&fallback_links_str).unwrap_or_else(|_| Vec::new());
+
+                if !links.is_empty() {
+                    eprintln!("INFO: Fallback selector found {} links", links.len());
+                } else {
+                    eprintln!("ERROR: Both primary and fallback selectors found no links");
+                }
+            }
+
+            // If max_page > 1, click next for additional pages
+            for _ in 2..=max_page {
+                // Click the next page (first non-current page)
+                let locator = page
+                    .locator(".gsc-cursor-page:not(.gsc-cursor-current-page)")
+                    .await;
+                if locator.click(Default::default()).await.is_ok() {
+                    // Wait for results to update with specific wait conditions
+                    let max_pagination_wait_ms = 10000;
+                    let pagination_check_interval_ms = 250;
+
+                    let mut page_loaded = false;
+                    for _ in 0..(max_pagination_wait_ms / pagination_check_interval_ms) {
+                        let result: String = page
+                            .evaluate_value("!!document.querySelector('.gsc-results')")
+                            .await
+                            .unwrap_or_else(|_| "false".to_string());
+
+                        if result == "true" {
+                            page_loaded = true;
+                            // Additional stabilization delay
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(
+                            pagination_check_interval_ms,
+                        ))
+                        .await;
+                    }
+
+                    if !page_loaded {
+                        eprintln!("WARNING: Pagination page did not load properly within timeout");
+                        break;
+                    }
+
+                    // Extract more links with the same specific selector
+                    let more_links_str: String = page
+                        .evaluate_value(r#"JSON.stringify(Array.from(document.querySelectorAll('.gsc-webResult.gsc-result .gs-webResult .gs-title a')).map(a => ({href: a.href, text: a.textContent.trim()})))"#)
+                        .await
+                        .unwrap_or_else(|_| "[]".to_string());
+
+                    let more_links: Vec<Link> =
+                        serde_json::from_str(&more_links_str).unwrap_or_else(|_| Vec::new());
+
+                    // Filter and dedup against global seen
+                    let filtered_more = more_links
+                        .into_iter()
+                        .filter(|l| {
+                            l.href.starts_with("https://developer.android.com/")
+                                && !l.text.is_empty()
+                                && seen.insert(l.href.clone())
+                        })
+                        .collect::<Vec<_>>();
+
+                    links.extend(filtered_more);
+                }
+            }
+
+            // No next_page
+
+            // If we got links, success
+            if !links.is_empty() {
+                eprintln!(
+                    "INFO: Successfully extracted {} links on attempt {}",
+                    links.len(),
+                    attempt
+                );
+                break;
+            }
+
+            if attempt == 3 {
+                return Err("No links extracted after 3 attempts".into());
+            }
+            // Exponential backoff: 1s, 2s, 4s
+            let backoff_secs = 2u64.pow(attempt - 1);
+            eprintln!(
+                "WARNING: No links extracted on attempt {} of 3, retrying after {} seconds",
+                attempt, backoff_secs
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        }
+
+        let result = SearchResult { links };
+        // TODO: Implement SQLite caching with TTL and eviction strategy
+        if result.links.is_empty() {
+            return Err("No links extracted".into());
+        }
+        Ok(serde_json::to_string(&result).unwrap())
     }
 }
 
@@ -295,7 +567,10 @@ async fn test_scraping() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     std::fs::write(".debug_browser.md", &markdown)?;
 
     println!("Browser markdown length: {}", markdown.len());
-    println!("Contains Vietnamese text: {}", markdown.contains("một thứ rất khó nắm giữ"));
+    println!(
+        "Contains Vietnamese text: {}",
+        markdown.contains("một thứ rất khó nắm giữ")
+    );
     println!("Contains title: {}", markdown.contains("Mùa hè bất tận"));
 
     // Show preview
@@ -305,6 +580,11 @@ async fn test_scraping() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
         preview_len,
         &markdown[..preview_len]
     );
+
+    // Test search
+    println!("\nTesting Android search for 'docked toolbar' with max_page=2...");
+    let search_result = server.search_android_dev("docked toolbar", 2).await?;
+    println!("Search result: {}", search_result);
 
     Ok(())
 }
