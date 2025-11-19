@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 use crate::constants::load_js_script;
 use crate::models::{Link, SearchResult};
 use readability_rust::{Readability, ReadabilityOptions};
+use crate::extractor;
 
 #[derive(Clone)]
 pub struct BrowserManager {
@@ -151,16 +152,16 @@ impl BrowserManager {
                     eprintln!("DEBUG: Readability extracted content ({} chars)", content.len());
                     content
                 } else {
-                    eprintln!("WARNING: Readability found no content, falling back to full HTML");
-                    html.clone()
+                    eprintln!("WARNING: Readability found no content, falling back to extractor module");
+                    extractor::extract_content(&html)
                 }
             } else {
-                eprintln!("WARNING: Readability parsing failed, falling back to full HTML");
-                html.clone()
+                eprintln!("WARNING: Readability parsing failed, falling back to extractor module");
+                extractor::extract_content(&html)
             }
         } else {
-            eprintln!("WARNING: Failed to initialize Readability, falling back to full HTML");
-            html.clone()
+            eprintln!("WARNING: Failed to initialize Readability, falling back to extractor module");
+            extractor::extract_content(&html)
         };
 
         // Convert to markdown
@@ -434,3 +435,4 @@ impl BrowserManager {
         Ok(serde_json::to_string(&result).unwrap())
     }
 }
+

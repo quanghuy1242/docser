@@ -514,9 +514,12 @@ name = "docser"
 version = "0.1.0"
 dependencies = [
  "html2md",
+ "lazy_static",
  "playwright-rs",
  "readability-rust",
+ "regex",
  "rmcp",
+ "scraper 0.19.1",
  "serde",
  "serde_json",
  "tokio",
@@ -1722,7 +1725,7 @@ dependencies = [
  "clap",
  "html5ever 0.26.0",
  "regex",
- "scraper",
+ "scraper 0.18.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2006,6 +2009,22 @@ dependencies = [
  "ego-tree",
  "getopts",
  "html5ever 0.26.0",
+ "once_cell",
+ "selectors",
+ "tendril",
+]
+
+[[package]]
+name = "scraper"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "761fb705fdf625482d2ed91d3f0559dcfeab2798fe2771c69560a774865d0802"
+dependencies = [
+ "ahash",
+ "cssparser",
+ "ego-tree",
+ "getopts",
+ "html5ever 0.27.0",
  "once_cell",
  "selectors",
  "tendril",
