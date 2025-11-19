@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::constants::load_js_script;
 use crate::models::{Link, SearchResult};
+use readability_rust::{Readability, ReadabilityOptions};
 
 #[derive(Clone)]
 pub struct BrowserManager {
@@ -118,8 +119,31 @@ impl BrowserManager {
         // Get the HTML content, expanding shadow roots and handling slots, excluding style and script tags
         let html: String = page.evaluate_value(load_js_script()).await?;
 
+        // Extract main content using readability
+        let cleaned_html = if let Ok(mut parser) = Readability::new(&html, Some(ReadabilityOptions {
+            char_threshold: 200,
+            debug: false,
+            ..Default::default()
+        })) {
+            if let Some(article) = parser.parse() {
+                if let Some(content) = article.content {
+                    eprintln!("DEBUG: Readability extracted content ({} chars)", content.len());
+                    content
+                } else {
+                    eprintln!("WARNING: Readability found no content, falling back to full HTML");
+                    html.clone()
+                }
+            } else {
+                eprintln!("WARNING: Readability parsing failed, falling back to full HTML");
+                html.clone()
+            }
+        } else {
+            eprintln!("WARNING: Failed to initialize Readability, falling back to full HTML");
+            html.clone()
+        };
+
         // Convert to markdown
-        let markdown = html2md::parse_html(&html);
+        let markdown = html2md::parse_html(&cleaned_html);
 
         eprintln!("DEBUG: Markdown length: {}", markdown.len());
         Ok(markdown)

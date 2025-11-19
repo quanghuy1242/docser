@@ -11,6 +11,7 @@ serde_json = "1.0"
 html2md = "0.2"
 playwright-rs = "0.7.0"
 urlencoding = "2.1"
+readability-rust = "0.1.0"
 
 [profile.release]
 opt-level = "z"  # Optimize for size
