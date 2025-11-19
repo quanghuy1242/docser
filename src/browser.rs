@@ -62,15 +62,16 @@ impl BrowserManager {
             return Err(format!("HTTP error: {}", response.status()).into());
         }
 
-        // Smart waiting for SPA content: wait for Angular app to be ready
-        // Check for Angular-specific indicators or content elements
+        // Smart waiting for SPA content: wait for Angular/React/Vue app to be ready
+        // Check for framework-specific indicators or content elements
         let ready_indicators = vec![
             "document.querySelector('app-post')",     // Angular component
             "document.querySelector('[ng-version]')", // Angular app
-            "document.querySelector('main, article, .post-content, .article-content')", // Content areas
+            "document.querySelector('#root, #app, #__next, #vue-app')", // React/Vue roots
+            "document.querySelector('main, article, .post-content, .article-content, .content')", // Content areas
         ];
 
-        let max_wait_ms = 10000; // 10 seconds for heavy SPAs
+        let max_wait_ms = 15000; // 15 seconds for heavy SPAs
         let check_interval_ms = 250; // check every 250ms
         let mut page_ready = false;
 
@@ -78,26 +79,46 @@ impl BrowserManager {
             let mut ready = false;
 
             for indicator in &ready_indicators {
-                let result: String = page
+                let exists_str: String = page
                     .evaluate_value(&format!("!!({})", indicator))
                     .await
                     .unwrap_or_else(|_| "false".to_string());
 
-                if result == "true" {
+                if exists_str == "true" {
                     // Additional check: ensure the element has meaningful content
-                    let content_check: String = page
-                        .evaluate_value(&format!("({}).textContent.trim().length > 100", indicator))
+                    let content_len_str: String = page
+                        .evaluate_value(&format!("({}).textContent.trim().length", indicator))
                         .await
-                        .unwrap_or_else(|_| "false".to_string());
+                        .unwrap_or_else(|_| "0".to_string());
 
-                    if content_check == "true" {
-                        ready = true;
-                        eprintln!(
-                            "DEBUG: Page ready indicator '{}' found on attempt {}",
-                            indicator,
-                            attempt + 1
-                        );
-                        break;
+                    let content_len: usize = content_len_str.parse().unwrap_or(0);
+
+                    if content_len > 100 {
+                        // Check stability: ensure content doesn't change over next 3 ticks
+                        let mut stable = true;
+                        let initial_len = content_len;
+                        for _ in 0..3 {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(check_interval_ms)).await;
+                            let current_len_str: String = page
+                                .evaluate_value(&format!("({}).textContent.trim().length", indicator))
+                                .await
+                                .unwrap_or_else(|_| "0".to_string());
+                            let current_len: usize = current_len_str.parse().unwrap_or(0);
+                            if current_len != initial_len {
+                                stable = false;
+                                break;
+                            }
+                        }
+                        if stable {
+                            ready = true;
+                            eprintln!(
+                                "DEBUG: Page ready with stable content '{}' ({} chars) on attempt {}",
+                                indicator,
+                                initial_len,
+                                attempt + 1
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -121,7 +142,7 @@ impl BrowserManager {
 
         // Extract main content using readability
         let cleaned_html = if let Ok(mut parser) = Readability::new(&html, Some(ReadabilityOptions {
-            char_threshold: 200,
+            char_threshold: 500,
             debug: false,
             ..Default::default()
         })) {

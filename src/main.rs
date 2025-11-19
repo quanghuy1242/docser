@@ -26,19 +26,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 async fn test_scraping() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::browser::BrowserManager;
 
-    let url = "https://quanghuy.web.app/post/mua-he-bat-tan/jKxaFBKpr5dSGj4eGHNg";
+    let url = "https://m3.material.io/components/search/guidelines";
     println!("Testing content scraping for: {}", url);
 
     // Direct usage of browser manager for testing
     let browser = BrowserManager::new().await;
     let markdown = browser.scrape_page(url).await?;
-
-    println!("Browser markdown length: {}", markdown.len());
-    println!(
-        "Contains Vietnamese text: {}",
-        markdown.contains("một thứ rất khó nắm giữ")
-    );
-    println!("Contains title: {}", markdown.contains("Mùa hè bất tận"));
 
     // Show preview
     let preview_len = markdown.len().min(2000);
