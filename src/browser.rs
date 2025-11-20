@@ -92,7 +92,7 @@ impl BrowserManager {
                         .await
                         .unwrap_or_else(|_| "0".to_string());
 
-                    let content_len: usize = content_len_str.parse().unwrap_or(0);
+                    let content_len: usize = content_len_str.parse().map_or(0, |v| v);
 
                     if content_len > 100 {
                         // Check stability: ensure content doesn't change over next 3 ticks
@@ -104,7 +104,7 @@ impl BrowserManager {
                                 .evaluate_value(&format!("({}).textContent.trim().length", indicator))
                                 .await
                                 .unwrap_or_else(|_| "0".to_string());
-                            let current_len: usize = current_len_str.parse().unwrap_or(0);
+                            let current_len: usize = current_len_str.parse().map_or(0, |v| v);
                             if current_len != initial_len {
                                 stable = false;
                                 break;
@@ -254,8 +254,7 @@ impl BrowserManager {
                 .await
                 .unwrap_or_else(|_| "[]".to_string());
 
-            let all_links: Vec<Link> =
-                serde_json::from_str(&extracted_links_str).unwrap_or_else(|_| Vec::new());
+            let all_links: Vec<Link> = serde_json::from_str(&extracted_links_str).unwrap_or_default();
 
             // Filter and dedup
             let mut seen = std::collections::HashSet::new();
@@ -285,7 +284,7 @@ impl BrowserManager {
                     .evaluate_value(r#"JSON.stringify(Array.from(document.querySelectorAll('.devsite-article a')).filter(a => a.href.startsWith('https://developer.android.com/') && a.textContent.trim()).reduce((acc, a) => { if (!acc.some(item => item.href === a.href)) acc.push({href: a.href, text: a.textContent.trim()}); return acc; }, []))"#)
                     .await
                     .unwrap_or_else(|_| "[]".to_string());
-                links = serde_json::from_str(&fallback_links_str).unwrap_or_else(|_| Vec::new());
+                links = serde_json::from_str(&fallback_links_str).unwrap_or_default();
 
                 if !links.is_empty() {
                     eprintln!("INFO: Fallback selector found {} links", links.len());
@@ -386,8 +385,7 @@ impl BrowserManager {
                         .await
                         .unwrap_or_else(|_| "[]".to_string());
 
-                    let more_links: Vec<Link> =
-                        serde_json::from_str(&more_links_str).unwrap_or_else(|_| Vec::new());
+                    let more_links: Vec<Link> = serde_json::from_str(&more_links_str).unwrap_or_default();
 
                     // Filter and dedup against global seen
                     let filtered_more = more_links
@@ -432,7 +430,7 @@ impl BrowserManager {
         if result.links.is_empty() {
             return Err("No links extracted".into());
         }
-        Ok(serde_json::to_string(&result).unwrap())
+        Ok(serde_json::to_string(&result)?)
     }
 }
 

@@ -41,7 +41,8 @@ impl SimpleServer {
         &self,
         Parameters(request): Parameters<SearchAndroidRequest>,
     ) -> Result<CallToolResult, McpError> {
-        match self.browser.search_android_dev(&request.query, request.max_page.unwrap_or(1)).await {
+        let max_page = request.max_page.unwrap_or(1);
+        match self.browser.search_android_dev(&request.query, max_page).await {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
             Err(e) => Ok(CallToolResult::success(vec![Content::text(format!("Error: {}", e))])),
         }

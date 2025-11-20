@@ -4,7 +4,6 @@ use lazy_static::lazy_static;
 use readability_rust::Readability;
 
 struct Framework {
-    name: &'static str,
     main_container: &'static str,
     text_content_selector: &'static str,
     exclusions: &'static [&'static str],
@@ -12,74 +11,74 @@ struct Framework {
 
 lazy_static! {
     static ref FRAMEWORKS: Vec<Framework> = vec![
+        // Docusaurus v2/v3
         Framework {
-            name: "Docusaurus v2/v3",
             main_container: "main",
             text_content_selector: "article.markdown",
             exclusions: &[".pagination-nav", ".theme-doc-toc-desktop", ".theme-doc-sidebar-container", ".hash-link"],
         },
+        // Sphinx (RTD)
         Framework {
-            name: "Sphinx (RTD)",
             main_container: ".wy-nav-content",
             text_content_selector: "[itemprop='articleBody']",
             exclusions: &[".wy-nav-side", ".rst-footer-buttons", "a.headerlink"],
         },
+        // Sphinx (Alabaster)
         Framework {
-            name: "Sphinx (Alabaster)",
             main_container: "div.body",
             text_content_selector: "div.body",
             exclusions: &[".sphinxsidebar", ".link-header"],
         },
+        // MkDocs (Material)
         Framework {
-            name: "MkDocs (Material)",
             main_container: ".md-main",
             text_content_selector: ".md-content__inner",
             exclusions: &[".md-sidebar", ".md-footer", ".md-header", ".md-clipboard"],
         },
+        // GitBook (Legacy)
         Framework {
-            name: "GitBook (Legacy)",
             main_container: ".page-inner",
             text_content_selector: ".page-inner section",
             exclusions: &[".book-summary", ".book-header"],
         },
+        // GitBook (Cloud)
         Framework {
-            name: "GitBook (Cloud)",
             main_container: "main",
             text_content_selector: "main",
             exclusions: &["nav", "div[class*='sidebar']"],
         },
+        // Hugo (General)
         Framework {
-            name: "Hugo (General)",
             main_container: "main",
             text_content_selector: ".content, .post-content",
             exclusions: &["header", "footer", ".menu"],
         },
+        // Nextra
         Framework {
-            name: "Nextra",
             main_container: "main",
             text_content_selector: "main",
             exclusions: &["nav", "footer", ".nextra-sidebar-container"],
         },
+        // NY Times
         Framework {
-            name: "NY Times",
             main_container: "#site-content",
             text_content_selector: "section[data-testid='story-content']",
             exclusions: &["#site-content-skip", "[data-testid='related-links']", "[data-testid='newsletter-signup']"],
         },
+        // BBC News
         Framework {
-            name: "BBC News",
             main_container: "[role='main']",
             text_content_selector: "[data-component='text-block']",
             exclusions: &["[role='complementary']", ".bbc-1151pbn"],
         },
+        // CNN
         Framework {
-            name: "CNN",
             main_container: ".article__content",
             text_content_selector: ".Paragraph__component",
             exclusions: &[".el-spoke-story", ".zn-body__read-more", ".ad-container"],
         },
+        // Reuters
         Framework {
-            name: "Reuters",
             main_container: "main",
             text_content_selector: "[class*='article-body__content']",
             exclusions: &["[data-testid='sidebar']", "nav", ".read-next-container"],
